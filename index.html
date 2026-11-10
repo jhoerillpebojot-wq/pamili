@@ -1,0 +1,179 @@
+<!-- ============================================================
+  LARDER INSTALL + OFFLINE ADD-ON — paste right before </body>,
+  after the other two blocks. Needs sw.js, manifest.webmanifest and the
+  three icon-*.png files saved next to your index.html (see notes).
+  ============================================================ -->
+<style>
+#net-banner{position:fixed;left:50%;top:calc(10px + env(safe-area-inset-top,0px));transform:translate(-50%,-140%);z-index:58;
+  background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn);border-radius:999px;padding:9px 18px;font-size:13px;font-weight:600;
+  max-width:92vw;text-align:center;transition:transform .25s ease;pointer-events:none}
+#net-banner.show{transform:translate(-50%,0)}
+@media(max-width:880px){#net-banner{top:calc(74px + env(safe-area-inset-top,0px))}}
+#upd-bar{position:fixed;left:12px;right:12px;bottom:calc(84px + env(safe-area-inset-bottom,0px));z-index:57;display:none;align-items:center;justify-content:space-between;gap:12px;
+  background:var(--bg-card);border:1px solid var(--accent);border-radius:12px;padding:12px 14px;font-size:13.5px;max-width:520px;margin:0 auto}
+#upd-bar.show{display:flex}
+@media(min-width:881px){#upd-bar{bottom:20px;left:auto;right:20px;margin:0}}
+#side-pwa{display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--border-hairline);padding-top:16px}
+#side-pwa .btn{justify-content:center;width:100%}
+.pwa-pill{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-secondary);padding:0 6px}
+.pwa-pill i{width:8px;height:8px;border-radius:50%;background:var(--text-faint);flex:none}
+.pwa-pill.ready i{background:var(--fresh)} .pwa-pill.off i{background:var(--warn)}
+.sheet-steps{margin:0 0 18px;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.sheet-steps li{display:flex;gap:12px;background:var(--bg-card);border-radius:8px;padding:11px 13px;font-size:13.5px;color:var(--text-secondary)}
+.sheet-steps li b.n{flex:none;color:var(--accent);font-family:'Fraunces',serif}
+@media print{#net-banner,#upd-bar,#side-pwa{display:none!important}}
+</style>
+
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const web = /^https?:$/.test(location.protocol);
+  const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  const plat = () => (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)) ? "ios"
+    : /Android/.test(navigator.userAgent) ? "android" : "desktop";
+
+  /* ---- manifest + home-screen icon ---- */
+  const addLink = (rel, href) => { const l = document.createElement("link"); l.rel = rel; l.href = href; document.head.appendChild(l); };
+  addLink("manifest", "manifest.webmanifest");
+  addLink("apple-touch-icon", "icon-192.png");
+  [["apple-mobile-web-app-title", "Larder"], ["apple-mobile-web-app-status-bar-style", "black-translucent"]].forEach(([n, c]) => {
+    if (!document.querySelector('meta[name="' + n + '"]')) { const m = document.createElement("meta"); m.name = n; m.content = c; document.head.appendChild(m); }
+  });
+
+  /* ---- state ---- */
+  let deferred = null, reg = null, swReady = false, persisted = null;
+  addEventListener("beforeinstallprompt", e => { e.preventDefault(); deferred = e; refresh(); });
+  addEventListener("appinstalled", () => { deferred = null; App.toast("Larder installed — find it on your home screen"); refresh(); });
+
+  /* ---- install guide (iPhone can't one-tap install) ---- */
+  const GUIDE = {
+    ios: ["iPhone / iPad", ["Open this page in <b>Safari</b>.", "Tap the <b>Share</b> button (square with an arrow up).", "Scroll and tap <b>Add to Home Screen</b>.", "Tap <b>Add</b>. Larder now opens like an app."], "Apple only allows installing through Safari's Share menu."],
+    android: ["Android", ["Open this page in <b>Chrome</b>.", "Tap the <b>⋮</b> menu at the top right.", "Tap <b>Install app</b> or <b>Add to Home screen</b>.", "Tap <b>Install</b>."], "On Samsung Internet: menu (≡), then Add page to, then Home screen."],
+    desktop: ["Computer", ["Open this page in <b>Chrome</b> or <b>Edge</b>.", "Click the <b>install icon</b> at the right end of the address bar.", "Click <b>Install</b>. Larder opens in its own window."], "No icon? Chrome: ⋮ menu, Cast, save and share, Install page as app. Safari on Mac: File, Add to Dock."]
+  };
+  const ov = document.createElement("div");
+  ov.className = "modal-overlay"; ov.id = "overlay-install"; ov.setAttribute("role", "dialog"); ov.setAttribute("aria-modal", "true"); ov.setAttribute("aria-labelledby", "inst-title");
+  ov.innerHTML = '<div class="modal-box"><div class="display" id="inst-title">Install Larder</div><p class="meta">Add it to your home screen so it opens like an app, even without internet.</p>' +
+    '<div class="filter-row" id="inst-tabs"></div><ol class="sheet-steps" id="inst-steps"></ol><p class="meta" id="inst-note" style="margin-bottom:16px"></p>' +
+    '<div class="modal-actions"><button class="btn btn-accent" id="inst-ok">Okay</button></div></div>';
+  document.body.appendChild(ov);
+  const closeGuide = () => ov.classList.remove("open");
+  ov.addEventListener("click", e => { if (e.target === ov) closeGuide(); });
+  $("inst-ok").onclick = closeGuide;
+  document.addEventListener("keydown", e => { if (e.key === "Escape") closeGuide(); });
+  function drawGuide(k) {
+    $("inst-tabs").innerHTML = Object.entries(GUIDE).map(([x, v]) => `<button class="filter-chip small" aria-pressed="${x === k}" data-g="${x}">${v[0]}</button>`).join("");
+    $("inst-steps").innerHTML = GUIDE[k][1].map((t, i) => `<li><b class="n">${i + 1}</b><span>${t}</span></li>`).join("");
+    $("inst-note").textContent = GUIDE[k][2];
+    $("inst-tabs").querySelectorAll("[data-g]").forEach(b => b.onclick = () => drawGuide(b.dataset.g));
+  }
+  function showGuide() { drawGuide(plat()); ov.classList.add("open"); document.documentElement.classList.add("modal-open"); $("inst-ok").focus(); }
+  const _cg = closeGuide; ov.querySelector("#inst-ok").addEventListener("click", () => { if (!document.querySelector(".modal-overlay.open")) document.documentElement.classList.remove("modal-open"); });
+
+  async function install() {
+    if (standalone()) { App.toast("You're already using the installed app"); return; }
+    if (deferred) { const d = deferred; deferred = null; d.prompt(); try { await d.userChoice; } catch (e) {} refresh(); return; }
+    showGuide();
+  }
+
+  /* ---- offline banner ---- */
+  const nb = document.createElement("div"); nb.id = "net-banner"; nb.setAttribute("role", "status");
+  nb.textContent = "You're offline. Larder still works and saves on this device.";
+  document.body.appendChild(nb);
+  const net = () => { nb.classList.toggle("show", !navigator.onLine); refresh(); };
+  addEventListener("offline", net);
+  addEventListener("online", () => { net(); App.toast("Back online"); });
+
+  /* ---- sidebar install button + status pill ---- */
+  const side = document.createElement("div"); side.id = "side-pwa";
+  side.innerHTML = '<button class="btn btn-accent btn-small" id="side-install">Install app</button><div class="pwa-pill" id="side-pill"><i></i><span></span></div>';
+  const sb = document.getElementById("sidebar"); const wg = sb.querySelector(".week-glance");
+  wg.insertAdjacentElement("afterend", side); wg.style.marginTop = "auto";
+  $("side-install").onclick = install;
+
+  /* ---- update bar ---- */
+  const ub = document.createElement("div"); ub.id = "upd-bar";
+  ub.innerHTML = '<span>A new version of Larder is ready.</span><button class="btn btn-accent btn-small" id="upd-go">Update</button>';
+  document.body.appendChild(ub);
+  let waiting = null;
+  $("upd-go").onclick = () => { if (waiting) waiting.postMessage("SKIP_WAITING"); };
+  function watch(r) {
+    if (r.waiting && navigator.serviceWorker.controller) { waiting = r.waiting; ub.classList.add("show"); }
+    r.addEventListener("updatefound", () => {
+      const w = r.installing; if (!w) return;
+      w.addEventListener("statechange", () => {
+        if (w.state === "installed" && navigator.serviceWorker.controller) { waiting = w; ub.classList.add("show"); }
+      });
+    });
+  }
+
+  /* ---- service worker ---- */
+  if ("serviceWorker" in navigator && web) {
+    let reloading = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => { if (reloading) return; reloading = true; location.reload(); });
+    navigator.serviceWorker.register("sw.js").then(r => { reg = r; watch(r); }).catch(() => { refresh(); });
+    navigator.serviceWorker.ready.then(() => { swReady = true; refresh(); });
+  }
+  if (navigator.storage && navigator.storage.persist) {
+    navigator.storage.persist().then(p => { persisted = p; refresh(); }).catch(() => {});
+  }
+
+  /* ---- Settings card ---- */
+  const sec = $("panel-settings");
+  function status() {
+    if (!web) return ["Not available here", "Offline mode needs the app to be hosted online (https). It can't start when opened as a plain file."];
+    if (!("serviceWorker" in navigator)) return ["Not supported", "This browser can't run Larder offline."];
+    if (swReady) return ["Ready", "Larder is saved on this device and opens without internet."];
+    return ["Getting ready…", "Keep this page open once while it saves itself for offline use."];
+  }
+  const row = (t, s, ctl) => `<div class="set-row"><div class="lbl"><b>${t}</b><small>${s}</small></div>${ctl}</div>`;
+  function cardHtml() {
+    const st = status(), inst = standalone();
+    return `<div class="set-card" id="pwa-card"><h2>Install &amp; offline</h2>
+      <p class="sub">Use Larder like a real app, in the kitchen or anywhere without signal.</p>
+      ${row("Install on this device", inst ? "You're using the installed app." : (deferred ? "One tap to add it to your home screen." : "Step-by-step instructions for your device."),
+        inst ? '<span class="badge fresh">Installed</span>' : '<button class="btn btn-accent btn-small" data-pwa="install">Install app</button>')}
+      ${row("Offline mode", st[1], `<span class="badge ${swReady ? "fresh" : "soon"}">${st[0]}</span>`)}
+      ${row("Protect my data", persisted ? "Your browser has promised not to clear Larder's data when space runs low." : "Ask the browser not to clear your pantry and plans when space runs low.",
+        persisted ? '<span class="badge fresh">Protected</span>' : '<button class="btn btn-ghost btn-small" data-pwa="persist">Protect</button>')}
+      ${row("Updates", "Check for a newer version of Larder.", '<button class="btn btn-ghost btn-small" data-pwa="update">Check now</button>')}
+    </div>`;
+  }
+  function inject() {
+    if (!sec) return;
+    const old = $("pwa-card"); if (old) old.remove();
+    if (!sec.querySelector("#heading-settings")) return;
+    const cards = [...sec.querySelectorAll(".set-card")];
+    const anchor = cards.find(c => /Your data/.test(c.textContent.slice(0, 40)));
+    const html = cardHtml();
+    if (anchor) anchor.insertAdjacentHTML("beforebegin", html); else sec.insertAdjacentHTML("beforeend", html);
+  }
+  if (sec) {
+    new MutationObserver(() => { if (!$("pwa-card") && sec.querySelector("#heading-settings")) inject(); }).observe(sec, { childList: true });
+    sec.addEventListener("click", async e => {
+      const b = e.target.closest("[data-pwa]"); if (!b) return;
+      const a = b.dataset.pwa;
+      if (a === "install") install();
+      else if (a === "persist") {
+        try { persisted = await navigator.storage.persist(); } catch (x) {}
+        App.toast(persisted ? "Your data is protected" : "Your browser decided not to. Try after installing the app.");
+        refresh();
+      } else if (a === "update") {
+        if (!reg) { App.toast(web ? "Nothing to check yet" : "Updates only work when hosted online"); return; }
+        try { await reg.update(); } catch (x) {}
+        App.toast(waiting ? "A new version is ready" : "You're on the latest version");
+      }
+    });
+  }
+
+  function refresh() {
+    const inst = standalone();
+    side.querySelector("#side-install").style.display = inst ? "none" : "";
+    const pill = $("side-pill"), off = !navigator.onLine;
+    pill.className = "pwa-pill " + (off ? "off" : swReady ? "ready" : "");
+    pill.querySelector("span").textContent = off ? "Offline" : swReady ? "Works offline" : "Online";
+    if (sec && sec.classList.contains("active")) inject();
+  }
+  net();
+})();
+</script>
